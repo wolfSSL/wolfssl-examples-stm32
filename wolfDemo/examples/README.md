@@ -11,10 +11,15 @@ nice visual display.
 
 ## [wolfCrypt-bench](wolfCrypt-bench)
 
-This runs the wolfCrypt benchmark with STM32 HAL hardware optimisations enabled.
+This runs the wolfCrypt benchmark in a loop with the STM32 hardware crypto
+(AES, HASH, PKA and TRNG) enabled. It is built with `make` against a wolfSSL
+source tree and the STM32CubeU5 package, and can also build a pure software
+variant and the wolfCrypt self-test. See its [README](wolfCrypt-bench/README.md)
+for details.
 
 Each log line output will cycle the LED "bark bars" one step. Log data will be
-output on the USB's UART at 115200bps.
+output on the USB's UART at 115200bps. Hold BT2 during reset for an LED-only
+demo.
 
 ## [wolfTPM-bench](wolfTPM-bench)
 
