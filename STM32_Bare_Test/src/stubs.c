@@ -14,14 +14,31 @@ extern uint32_t _heap_limit;
 
 static char *heap_end;
 
+/* Clearance left between the heap and the live stack, in bytes. _sbrk's own
+ * frame sits a little below the caller's, and malloc still has to return
+ * through it, so the check needs slack. */
+#define SBRK_STACK_MARGIN 256
+
+/* _heap_limit is _estack - _Min_Stack_Size, a static guess at how much stack
+ * the image needs. When the guess is low the stack descends below it and a
+ * heap that only honours _heap_limit hands out memory the stack is already
+ * using -- malloc keeps succeeding and the two corrupt each other. There is
+ * no MSPLIM on ARMv6-M to catch that, so compare against the live stack
+ * pointer as well: whichever ceiling is lower wins. */
 void *_sbrk(ptrdiff_t incr)
 {
     char *prev;
+    char *ceiling = (char *)&_heap_limit;
+    char *sp = (char *)__builtin_frame_address(0);
+
+    if (sp - SBRK_STACK_MARGIN < ceiling) {
+        ceiling = sp - SBRK_STACK_MARGIN;
+    }
     if (heap_end == 0) {
         heap_end = (char *)&_end;
     }
     prev = heap_end;
-    if ((heap_end + incr) >= (char *)&_heap_limit) {
+    if ((heap_end + incr) >= ceiling) {
         errno = ENOMEM;
         return (void *)-1;
     }

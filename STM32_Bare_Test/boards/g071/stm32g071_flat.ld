@@ -14,7 +14,10 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 _Min_Heap_Size  = 0x800;   /* 2K heap  -- tight RAM */
-_Min_Stack_Size = 0x1000;  /* 4K stack -- WOLFSSL_SMALL_STACK pattern */
+/* 4K stack -- WOLFSSL_SMALL_STACK pattern. src/stubs.c also refuses to grow
+ * the heap into the live stack, so an optimistic carve here degrades to a
+ * clean allocation failure rather than heap/stack corruption. */
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x1000;
 _heap_limit = _estack - _Min_Stack_Size;
 
 MEMORY

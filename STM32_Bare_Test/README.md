@@ -411,7 +411,13 @@ Validated on real silicon:
 |----------|---------|----------------|---------------------------------------------------------------------|
 | `BUILD`  | `bare`  | `bare`,`cubemx`| `cubemx` swaps `hw_init.c` for `hw_init_cubemx.c` and pulls in the ST HAL driver pack instead of direct-register init. Wolfcrypt port flag becomes `WOLFSSL_STM32_CUBEMX`. |
 | `STACK`  | `0`     | `0`,`1`        | `STACK=1` compiles in wolfssl's memory/stack trackers (`-DSTM32_BARE_STACK_TRACK`) so `TARGET=bench` reports per-algo heap/stack and a cumulative peak. `bench_matrix.sh -S` runs it as a companion pass; see "Stack and heap measurements" below. |
-| `PQC`    | `0`     | `0`,`1`        | `PQC=1` enables ML-DSA (Dilithium) and ML-KEM with the small-memory variants (`WOLFSSL_DILITHIUM_NO_LARGE_CODE`, `WOLFSSL_DILITHIUM_SMALL`, `WOLFSSL_DILITHIUM_VERIFY_SMALL_MEM`, `WOLFSSL_DILITHIUM_VERIFY_NO_MALLOC`, `WOLFSSL_MLKEM_MAKEKEY_SMALL_MEM`, `WOLFSSL_MLKEM_ENCAPSULATE_SMALL_MEM`) plus the SHA-3 / SHAKE-128/256 dependency. Adds ~100 KB of text -- small-flash boards (c031, g071, u083) may overflow. Mirrors the wolfBoot resource-constrained preset. |
+| `PQC`    | `0`     | `0`,`1`,`mldsa`,`mldsa-smallest`,`mldsa-vfy`,`mldsa-vfy-pin`,`mldsa-vfy-fast` | `PQC=1` enables ML-DSA (Dilithium) and ML-KEM with the small-memory variants (`WOLFSSL_DILITHIUM_NO_LARGE_CODE`, `WOLFSSL_DILITHIUM_SMALL`, `WOLFSSL_DILITHIUM_VERIFY_SMALL_MEM`, `WOLFSSL_DILITHIUM_VERIFY_NO_MALLOC`, `WOLFSSL_MLKEM_MAKEKEY_SMALL_MEM`, `WOLFSSL_MLKEM_ENCAPSULATE_SMALL_MEM`) plus the SHA-3 / SHAKE-128/256 dependency. Adds ~100 KB of text -- small-flash boards (c031, g071, u083) may overflow. Mirrors the wolfBoot resource-constrained preset. The `mldsa*` values drop ML-KEM, which is what fits the 128 KB boards `PQC=1` overflows, and select which ML-DSA memory variant is built: `mldsa` is key generation, signing and verifying with `WOLFSSL_MLDSA_SIGN_SMALL_MEM`; `mldsa-smallest` swaps in `WOLFSSL_MLDSA_SIGN_SMALLEST_MEM`, which is what lets a 36 KB part sign with ML-DSA-87; `mldsa-vfy` is verify-only with `WOLFSSL_MLDSA_VERIFY_SMALLEST_MEM` allocating its buffers; `mldsa-vfy-pin` adds `WOLFSSL_MLDSA_VERIFY_NO_MALLOC` to pin them in the key for a build with no allocator; `mldsa-vfy-fast` is verify-only with `WOLFSSL_MLDSA_VERIFY_SMALL_MEM`, faster at a higher peak. |
+| `MLDSA_SET` | `all` | `all`,`44`,`65`,`87` | Restricts a `PQC=mldsa*` build to one ML-DSA parameter set (`WOLFSSL_NO_ML_DSA_*` for the others), for per-set code size or to give one set the whole RAM budget. |
+| `EXTRA_DEFS` | empty | `-D...` | Appended to the compile flags, for a one-off measurement that does not warrant an axis -- e.g. `EXTRA_DEFS=-DBENCH_MIN_RUNTIME_SEC=10.0` to average a rejection-sampled operation such as ML-DSA signing over more iterations than the benchmark's default 1 second window. |
+| `CLK`    | board default | `16`,`64` | SYSCLK in MHz, `g071` with `BUILD=bare` only. `CLK=64` brings up the PLL in place of HSI16; the board's `clock_init()` reads `STM32_BARE_CLK_HZ`. The g071 CubeMX path is fixed at 16 MHz, so `CLK=64` is rejected there rather than running at 16 MHz while reporting 64. |
+| `STACK_SZ` | per-board `.ld` | bytes | Overrides the linker's stack carve on any board (`-Wl,--defsym=_stack_size=`). The carve sets `_heap_limit`, and `_sbrk()` in `src/stubs.c` also refuses to grow into the live stack, so an undersized carve surfaces as an allocation failure rather than heap/stack corruption. |
+
+Every axis feeds one build directory per `BOARD`/`BUILD`/`TARGET`/`CONFIG`, and Make does not track flag changes on its own, so the effective compiler and linker flags are recorded in `build/<dir>/cflags.stamp` and `ldflags.stamp`. Changing any axis between runs rewrites the affected stamp and rebuilds what depends on it (every object for a compile flag, the link alone for `STACK_SZ`); no `make clean` is needed.
 
 ## Build matrix (TARGET=test, all 27 boards)
 
@@ -635,6 +641,53 @@ Observation:
 - The M4F line is ~70-80% of the M7F line on equivalent clocks-normalized basis. M7 dual-issue + cache wins on PQC but the gap is not the 4x-ish that integer benchmarks suggest -- Keccak's serial inner-loop dependencies prevent the M7 from utilizing both pipeline slots.
 
 The full bench passes on all five boards (`Benchmark result: 0 (PASS)`) -- self-tests for ML-KEM and ML-DSA run before the bench timing loop and both verify clean.
+
+#### PQC=mldsa* (ML-DSA memory variants, g071 Cortex-M0+)
+
+Captured with `make BOARD=g071 CONFIG=c BUILD=bare TARGET=bench PQC=<variant> MLDSA_SET=<set> STACK=1 CLK=64`, on the only Cortex-M0+ board in the matrix. Reported in ms/op and bytes rather than ops/sec, because at this scale a single operation is the unit that matters. Heap is wolfCrypt's own peak-allocation counter; static RAM for these images is 7,296 B of the part's 36,864 B. Pure C: ARMv6-M has no `UMULL` for the NTT and there is no ARMv6-M Keccak assembly in the tree, so these are a floor rather than a representative PQC number.
+
+Verify only, 512-byte message. The key object column is for a build with that one parameter set compiled in, which is what a verify-only device ships; with all three the key is the largest of them.
+
+| Variant                                              | Set | Time     | Key object | Heap     | Key + heap |
+|------------------------------------------------------|-----|---------:|-----------:|---------:|-----------:|
+| `mldsa-vfy-pin` (`VERIFY_SMALLEST_MEM` + `NO_MALLOC`)| 44  | 127.1 ms |    6,904 B |        0 |    6,904 B |
+| `mldsa-vfy` (`VERIFY_SMALLEST_MEM`)                  | 44  | 126.0 ms |    1,736 B |  5,032 B |    6,768 B |
+| `mldsa-vfy-fast` (`VERIFY_SMALL_MEM`)                | 44  |  96.2 ms |    1,736 B |  8,104 B |    9,840 B |
+| `mldsa-vfy-pin`                                      | 65  | 218.7 ms |    7,544 B |        0 |    7,544 B |
+| `mldsa-vfy`                                          | 65  | 216.7 ms |    2,376 B |  5,032 B |    7,408 B |
+| `mldsa-vfy-fast`                                     | 65  | 155.1 ms |    2,376 B |  9,128 B |   11,504 B |
+| `mldsa-vfy-pin`                                      | 87  | 378.0 ms |    8,440 B |        0 |    8,440 B |
+| `mldsa-vfy`                                          | 87  | 374.3 ms |    3,016 B |  5,288 B |    8,304 B |
+| `mldsa-vfy-fast`                                     | 87  | 254.0 ms |    3,016 B | 11,432 B |   14,448 B |
+
+Key generation, signing and verifying. `MAKE_KEY_SMALL_MEM` in both; the variants differ only in the signer.
+
+| Variant                                  | Set | Key gen  | Key gen heap | Sign       | Sign heap | Verify   | Verify heap |
+|------------------------------------------|-----|---------:|-------------:|-----------:|----------:|---------:|------------:|
+| `mldsa` (`SIGN_SMALL_MEM`)               | 44  |  83.2 ms |     13,256 B |     563 ms |  13,224 B |  95.9 ms |     8,104 B |
+| `mldsa`                                  | 65  | 141.6 ms |     18,440 B |   1,315 ms |  16,296 B | 154.6 ms |     9,128 B |
+| `mldsa`                                  | 87  | 234.2 ms |     24,040 B | `MEMORY_E` |        -- |       -- |          -- |
+| `mldsa-smallest` (`SIGN_SMALLEST_MEM`)   | 44  |  83.3 ms |     13,256 B |     603 ms |   9,128 B |  95.9 ms |     8,104 B |
+| `mldsa-smallest`                         | 65  | 141.8 ms |     18,440 B |   1,392 ms |  11,176 B | 154.6 ms |     9,128 B |
+| `mldsa-smallest`                         | 87  | 234.3 ms |     24,040 B |   1,430 ms |  13,480 B | 253.3 ms |    11,432 B |
+
+Code size, `-Os -mcpu=cortex-m0plus`, text + rodata per object. `sha3.c` is 5,476 B in every variant and is not optional, ML-DSA being mostly Keccak.
+
+| Variant          | `wc_mldsa.o`, one set | `wc_mldsa.o`, all three | Whole bench image |
+|------------------|----------------------:|------------------------:|------------------:|
+| `mldsa-vfy-pin`  |       4,843 - 4,879 B |                 5,439 B |         126,240 B |
+| `mldsa-vfy`      |       4,851 - 4,879 B |                 5,443 B |         126,240 B |
+| `mldsa-vfy-fast` |       4,905 - 4,927 B |                 5,517 B |         126,304 B |
+| `mldsa`          |     11,051 - 11,310 B |                12,388 B |         116,916 B |
+| `mldsa-smallest` |     11,119 - 11,382 B |                12,516 B |         117,140 B |
+
+Notes:
+
+- **All three parameter sets do key generation, signing and verification on this 36 KB part**, which was not true before wolfssl PR #11569. ML-DSA-87 signing needs `WOLFSSL_MLDSA_SIGN_SMALLEST_MEM`: with `PQC=mldsa` it returns `MEMORY_E` (-125), and it does so even at `MLDSA_SET=87`, so it is the signer's own working set rather than the other sets' data crowding it out.
+- `mldsa-vfy` is the smallest total RAM at every parameter set and the same speed as `mldsa-vfy-pin`, so pinning now buys only the property of never calling the allocator, at 136 B more. Use `mldsa-vfy-pin` for a heapless build, not to save memory.
+- Verify-only images are the larger ones in flash because the benchmark bakes test vectors and public keys in, while a signing build generates its key at run time.
+- Signing time is deterministic per image, not per run: the G071 has no entropy source and the software DRBG seeds reproducibly, so three successive flashes of one image give byte-identical output, while two images of the same variant differed by a factor of two. Repeating a flash does not sample the rejection distribution -- use `EXTRA_DEFS=-DBENCH_MIN_RUNTIME_SEC=10.0`, which is what the sign figures above are averaged over (16-18 operations at ML-DSA-44, 8 at -65, 10 at -87). Key generation and verify do not reject and are stable to about 0.1%.
+- The per-row stack figure the bench prints is a running high-water delta, so a row shallower than an earlier one reports 0 and only the deepest ML-DSA operation reports a real number; per-operation attribution is not available from it. Budget about 3.4 KB of stack for ML-DSA on this core. The whole-run peak heap of 26,248 B on top of 7,296 B static leaves 3,320 B for stack, and the run completes, which with the `_sbrk()` live-stack guard is positive evidence heap and stack never met.
 
 #### Known caveats
 
@@ -997,6 +1050,38 @@ Notes:
 - ASM Thumb2 wins AES-CBC/GCM and ChaCha/Poly1305. SHA-256 is slower
   in ASM than C on M4 -- the hand-scheduled Thumb2 isn't as good as
   what gcc emits for SHA-256 specifically.
+
+### NUCLEO-G071RB -- STM32G071RB (Cortex-M0+, 64 MHz via PLL)
+
+HSI16 -> PLL -> SYSCLK 64 MHz with `CLK=64`; the board comes up on HSI16 at 16 MHz otherwise, and the CubeMX path is fixed at 16 MHz. **The G071 has no crypto hardware of any kind** -- no AES, no HASH, no RNG and no PKA -- so every algorithm runs in software and the HASH-DRBG is seeded in software. ARMv6-M has no Thumb-2, so `CONFIG=asm` does not exist for this board; only `c` and `bare` do, and they are the same build in practice.
+
+Captured with `make BOARD=g071 CONFIG=c BUILD=bare TARGET=bench PQC=0 CLK=64`.
+
+| Algorithm              | C / BARE @ 64 MHz |
+|------------------------|------------------:|
+| AES-128-CBC enc        |     330.2 KiB/s   |
+| AES-128-CBC dec        |     330.5 KiB/s   |
+| AES-192-CBC enc        |     291.5 KiB/s   |
+| AES-256-CBC enc        |     261.7 KiB/s   |
+| AES-128-ECB enc        |     347.8 KiB/s   |
+| AES-256-ECB enc        |     272.8 KiB/s   |
+| ChaCha20               |     1.313 MiB/s   |
+| ChaCha20-Poly1305 enc  |     340.5 KiB/s   |
+| Poly1305               |     490.2 KiB/s   |
+| MD5                    |     2.006 MiB/s   |
+| SHA-1                  |     1.099 MiB/s   |
+| SHA-256                |     517.8 KiB/s   |
+| HMAC-MD5               |     1.986 MiB/s   |
+| HMAC-SHA-1             |     1.089 MiB/s   |
+| HMAC-SHA256            |     513.7 KiB/s   |
+| RNG SHA-256 DRBG       |     206.6 KiB/s   |
+| PBKDF2                 |      62.4 bytes/s |
+
+Notes:
+
+- `CONFIG=bare` produces an identical image size (84,500 B of flash, 7,104 B of static RAM) and lands within measurement noise on every row, because there is no crypto peripheral for the BARE driver to drive. The two configs are listed as one column for that reason.
+- `STM32_G071_TRIM` in `user_settings.h` drops ECC, RSA, DH, AES-GCM, AES-CCM, SHA-384/512, Curve25519 and Ed25519 -- software ECC alone overflows the 128 KB part -- so those rows are absent by configuration rather than by failure. ML-DSA is the asymmetric algorithm this board does carry: see "PQC=mldsa* (ML-DSA memory variants, g071 Cortex-M0+)" above.
+- At 64 MHz this board is the slowest in the matrix by a wide margin, which is the point of keeping it: it is the floor for what a software-only ARMv6-M part does.
 
 ### Per-board template (fill in as boards come online)
 

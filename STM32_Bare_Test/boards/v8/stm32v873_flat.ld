@@ -9,7 +9,7 @@
 ENTRY(Reset_Handler)
 
 HEAP_SIZE  = 0x60000;   /* 384K heap  - ML-DSA/ML-KEM key material */
-STACK_SIZE = 0x40000;   /* 256K stack - SP-math ECC and ML-DSA sign frames */
+STACK_SIZE = DEFINED(_stack_size) ? _stack_size : 0x40000;   /* 256K stack - SP-math ECC and ML-DSA sign frames */
 
 /* Aliases for the STM32_Bare_Test STACK=1 adapter -- see board_common.c. */
 _Min_Heap_Size  = HEAP_SIZE;

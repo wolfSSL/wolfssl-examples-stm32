@@ -12,7 +12,7 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 _Min_Heap_Size  = 0x200;   /* 512 B heap  -- tight RAM */
-_Min_Stack_Size = 0x800;   /* 2 KB stack  */
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x800;   /* 2 KB stack  */
 _heap_limit = _estack - _Min_Stack_Size;
 
 MEMORY

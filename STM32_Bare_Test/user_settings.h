@@ -1002,6 +1002,77 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ */
+/* ML-DSA-only PQC axis (Makefile PQC=mldsa* -> -DSTM32_BARE_PQC_MLDSA) */
+/* ML-DSA only, no ML-KEM, which is what fits the 128 KB boards that   */
+/* PQC=1 overflows. The axis splits by which memory variant is used:   */
+/*   PQC=mldsa           key gen + sign + verify, small memory.        */
+/*   PQC=mldsa-smallest  as above, smallest-memory signer.             */
+/*   PQC=mldsa-vfy       verify only, smallest memory, allocated.      */
+/*   PQC=mldsa-vfy-pin   verify only, smallest memory, pinned in key.  */
+/*   PQC=mldsa-vfy-fast  verify only, small memory, allocated.         */
+/* MLDSA_SET=44|65|87 compiles that set alone.                         */
+/* Keys are generated in-image, so no ASN.1 is required -- the small-  */
+/* flash board trims define NO_ASN.                                   */
+/* ------------------------------------------------------------------ */
+#if defined(STM32_BARE_PQC_MLDSA)
+    #define WOLFSSL_HAVE_MLDSA
+    #define WOLFSSL_MLDSA_SMALL
+    #define WOLFSSL_MLDSA_NO_LARGE_CODE
+    #ifdef STM32_BARE_PQC_MLDSA_VFY
+        #define WOLFSSL_MLDSA_VERIFY_ONLY
+        /* Smallest verify RAM: vector z is streamed a polynomial at a time.
+         * STM32_BARE_PQC_MLDSA_FAST trades that back for speed. */
+        #ifndef STM32_BARE_PQC_MLDSA_FAST
+            #define WOLFSSL_MLDSA_VERIFY_SMALLEST_MEM
+        #endif
+        /* Pin the verify buffers in the key instead of allocating them, for
+         * a build with no allocator at all. Costs ~5 KB of key object. */
+        #ifdef STM32_BARE_PQC_MLDSA_VFY_PIN
+            #define WOLFSSL_MLDSA_VERIFY_NO_MALLOC
+        #endif
+    #else
+        #define WOLFSSL_MLDSA_MAKE_KEY_SMALL_MEM
+        #ifdef STM32_BARE_PQC_MLDSA_SIGN_SMALLEST
+            #define WOLFSSL_MLDSA_SIGN_SMALLEST_MEM
+        #else
+            #define WOLFSSL_MLDSA_SIGN_SMALL_MEM
+        #endif
+        #define WOLFSSL_MLDSA_DYNAMIC_KEYS
+    #endif
+    #define WOLFSSL_MLDSA_VERIFY_SMALL_MEM
+    #define WOLFSSL_MLDSA_NO_ASN1
+    /* ARMv6-M cannot do unaligned word access. */
+    #define WOLFSSL_MLDSA_ALIGNMENT 4
+    #ifdef STM32_BARE_PQC_MLDSA_SET
+        #if STM32_BARE_PQC_MLDSA_SET == 44
+            #define WOLFSSL_NO_ML_DSA_65
+            #define WOLFSSL_NO_ML_DSA_87
+        #elif STM32_BARE_PQC_MLDSA_SET == 65
+            #define WOLFSSL_NO_ML_DSA_44
+            #define WOLFSSL_NO_ML_DSA_87
+        #elif STM32_BARE_PQC_MLDSA_SET == 87
+            #define WOLFSSL_NO_ML_DSA_44
+            #define WOLFSSL_NO_ML_DSA_65
+        #else
+            #error "STM32_BARE_PQC_MLDSA_SET must be 44, 65 or 87"
+        #endif
+    #endif
+    #ifndef WOLFSSL_SHA3
+        #define WOLFSSL_SHA3
+    #endif
+    #ifndef WOLFSSL_SHAKE128
+        #define WOLFSSL_SHAKE128
+    #endif
+    #ifndef WOLFSSL_SHAKE256
+        #define WOLFSSL_SHAKE256
+    #endif
+    #if defined(BUILD_ASM) && !defined(STM32_BARE_SHA3_ASM) && \
+        !defined(WC_SHA3_NO_ASM)
+        #define WC_SHA3_NO_ASM
+    #endif
+#endif
+
+/* ------------------------------------------------------------------ */
 /* mTLS axis (Makefile TARGET=mtls -> -DSTM32_BARE_MTLS)                */
 /* TLS 1.3 only, ECDHE-ECDSA P-256, AES-GCM. The base config above      */
 /* already supplies AES-GCM, SHA-256/384, HKDF and ECC.                 */

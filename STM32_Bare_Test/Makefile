@@ -44,6 +44,7 @@ CONFIG   ?= bare
 TARGET   ?= test
 BUILD    ?= bare
 PQC      ?= 0
+MLDSA_SET ?= all
 STACK    ?= 0
 
 ifeq ($(filter $(BOARD),c031 h5 h573 h7 h7a3 h7s3 h723 u5 u3 u585 u545 u083 f207 f303 f437 f439 f767 wb55 wl55 g071 g474 g491 wba52 n657 c562 c5a3 l4a6 l552 l562 v8),)
@@ -98,12 +99,19 @@ endif
 ifeq ($(filter $(BUILD),bare cubemx),)
   $(error BUILD must be one of: bare | cubemx)
 endif
-# PQC axis: 0 = no post-quantum, 1 = enable ML-DSA + ML-KEM with the
+# PQC axis: 0 = none, 1 = ML-DSA + ML-KEM, mldsa* = ML-DSA only, with the
 # small-memory variants (matches the wolfBoot resource-constrained
 # preset). Adds substantial code so small-flash boards (c031, g071,
 # u083) may overflow.
-ifeq ($(filter $(PQC),0 1),)
-  $(error PQC must be 0 or 1)
+PQC_VALUES := 0 1 mldsa mldsa-smallest mldsa-vfy mldsa-vfy-pin mldsa-vfy-fast
+ifeq ($(filter $(PQC),$(PQC_VALUES)),)
+  $(error PQC must be one of: $(PQC_VALUES))
+endif
+# MLDSA_SET axis: which ML-DSA parameter sets to compile in. all = every set
+# the PQC variant allows; 44 | 65 | 87 = that set alone, for per-set code
+# size and for giving one set the whole RAM budget.
+ifeq ($(filter $(MLDSA_SET),all 44 65 87),)
+  $(error MLDSA_SET must be one of: all 44 65 87)
 endif
 # STACK axis: 0 = bench prints perf only (default; byte-identical to today).
 #             1 = bench prints per-algorithm peak stack + peak heap +
@@ -219,8 +227,32 @@ endif
 # STM32_BARE_PQC.
 ifeq ($(PQC),1)
   PQC_DEFS := -DSTM32_BARE_PQC
+else ifeq ($(PQC),mldsa)
+  # Key generation + sign + verify, small-memory variants. No ML-KEM, which
+  # is what lets this fit the 128 KB small-flash boards that PQC=1 overflows.
+  PQC_DEFS := -DSTM32_BARE_PQC_MLDSA
+else ifeq ($(PQC),mldsa-smallest)
+  # As above with the smallest-memory signer: one polynomial of y instead of
+  # the vector, regenerated for z.
+  PQC_DEFS := -DSTM32_BARE_PQC_MLDSA -DSTM32_BARE_PQC_MLDSA_SIGN_SMALLEST
+else ifeq ($(PQC),mldsa-vfy)
+  # Verify only, smallest-memory verify with allocated buffers.
+  PQC_DEFS := -DSTM32_BARE_PQC_MLDSA -DSTM32_BARE_PQC_MLDSA_VFY
+else ifeq ($(PQC),mldsa-vfy-pin)
+  # Verify only, smallest-memory verify with the buffers pinned in the key:
+  # no allocator at all, at a larger key.
+  PQC_DEFS := -DSTM32_BARE_PQC_MLDSA -DSTM32_BARE_PQC_MLDSA_VFY \
+              -DSTM32_BARE_PQC_MLDSA_VFY_PIN
+else ifeq ($(PQC),mldsa-vfy-fast)
+  # Verify only, small-memory verify: faster at a higher peak, which is the
+  # better trade whenever the RAM is there.
+  PQC_DEFS := -DSTM32_BARE_PQC_MLDSA -DSTM32_BARE_PQC_MLDSA_VFY \
+              -DSTM32_BARE_PQC_MLDSA_FAST
 else
   PQC_DEFS :=
+endif
+ifneq ($(MLDSA_SET),all)
+  PQC_DEFS += -DSTM32_BARE_PQC_MLDSA_SET=$(MLDSA_SET)
 endif
 ifeq ($(SHA3_ASM),1)
   SHA3_DEFS := -DSTM32_BARE_SHA3_ASM
@@ -273,7 +305,49 @@ else
   PUF_DEFS :=
 endif
 
-COMMON_DEFS := -DWOLFSSL_USER_SETTINGS $(CPU_DEFS) $(VARIANT_DEFS) $(BUILD_DEFS) $(PQC_DEFS) $(SHA3_DEFS) $(STACK_DEFS) $(GCM_DEFS) $(PUF_DEFS)
+# STACK_SZ overrides the linker's stack carve, as a decimal byte count (no
+# K/M suffix). Every board's linker script honours _stack_size, so this works
+# on any BOARD. The carve sets _heap_limit, the static ceiling _sbrk will not
+# grow the heap past; src/stubs.c additionally refuses to grow into the live
+# stack, so an under-sized carve surfaces as an allocation failure rather than
+# heap/stack corruption.
+ifneq ($(STACK_SZ),)
+  ifneq ($(shell echo '$(STACK_SZ)' | grep -cE '^[0-9]+$$'),1)
+    $(error STACK_SZ must be a decimal byte count, got '$(STACK_SZ)')
+  endif
+  LD_EXTRA := -Wl,--defsym=_stack_size=$(STACK_SZ)
+else
+  LD_EXTRA :=
+endif
+
+# CLK selects a non-default SYSCLK where the board supports it. Only g071
+# implements it so far: CLK=64 brings up the PLL for 64 MHz instead of
+# running from HSI16. The board's clock_init() reads STM32_BARE_CLK_HZ.
+ifneq ($(CLK),)
+  ifeq ($(filter $(CLK),16 64),)
+    $(error CLK must be one of: 16 | 64 (MHz))
+  endif
+  ifneq ($(BOARD),g071)
+    $(error CLK= is only implemented for BOARD=g071)
+  endif
+  # Only the bare path brings up the PLL. boards/g071/hw_init_cubemx.c is
+  # fixed at 16 MHz, so accepting CLK=64 there would run the benchmark at
+  # 16 MHz while reporting 64.
+  ifeq ($(BUILD),cubemx)
+    ifneq ($(CLK),16)
+      $(error CLK=$(CLK) needs BUILD=bare; the g071 CubeMX path is fixed at 16 MHz)
+    endif
+  endif
+  CLK_DEFS := -DSTM32_BARE_CLK_HZ=$(CLK)000000
+else
+  CLK_DEFS :=
+endif
+
+# EXTRA_DEFS appends arbitrary -D flags, for a one-off measurement that
+# does not warrant an axis (e.g. -DBENCH_MIN_RUNTIME_SEC=10.0 to average a
+# rejection-sampled operation over more iterations).
+EXTRA_DEFS ?=
+COMMON_DEFS := -DWOLFSSL_USER_SETTINGS $(CPU_DEFS) $(VARIANT_DEFS) $(BUILD_DEFS) $(PQC_DEFS) $(SHA3_DEFS) $(STACK_DEFS) $(GCM_DEFS) $(PUF_DEFS) $(CLK_DEFS) $(EXTRA_DEFS)
 
 # Optimization level, overridable for miscompile/UB bisects: make OPT=-O1 ...
 OPT ?= -O2
@@ -296,6 +370,7 @@ else
 endif
 
 LDFLAGS  := $(MCU_FLAGS) \
+            $(LD_EXTRA) \
             -T$(LDSCRIPT) \
             -Wl,-L,$(TOP)/boards/common \
             --specs=nosys.specs --specs=nano.specs \
@@ -561,6 +636,17 @@ ASM_OBJ := $(foreach s,$(SRC_ASM),$(call rel_obj,$(s)))
 OBJS    := $(C_OBJ) $(ASM_OBJ)
 DEPS    := $(OBJS:.o=.d)
 
+# Make tracks source edits, not flag changes. PQC=, CLK=, STACK_SZ= and the
+# other axes all land in one BUILD_DIR, so switching one between runs would
+# otherwise reuse the objects and ELF built under the previous flags. Each
+# stamp records the effective flags and is rewritten only when they differ:
+# every object depends on the compile stamp and the link on the link stamp,
+# so a changed axis rebuilds exactly what it affects without a clean.
+CFLAGS_STAMP  := $(BUILD_DIR)/cflags.stamp
+LDFLAGS_STAMP := $(BUILD_DIR)/ldflags.stamp
+CFLAGS_NOW    := $(CFLAGS) $(ASFLAGS)
+LDFLAGS_NOW   := $(LDFLAGS) $(LDLIBS)
+
 # ---- Targets ---------------------------------------------------------------
 .PHONY: all build flash size clean distclean size-report
 
@@ -571,15 +657,22 @@ build: $(BUILD_DIR)/app.bin $(BUILD_DIR)/app.hex size
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/obj
 
+.PHONY: FORCE
+$(CFLAGS_STAMP): FORCE | $(BUILD_DIR)
+	@echo '$(CFLAGS_NOW)' | cmp -s - $@ || echo '$(CFLAGS_NOW)' > $@
+
+$(LDFLAGS_STAMP): FORCE | $(BUILD_DIR)
+	@echo '$(LDFLAGS_NOW)' | cmp -s - $@ || echo '$(LDFLAGS_NOW)' > $@
+
 define COMPILE_C_TEMPLATE
-$(call rel_obj,$(1)): $(1) | $(BUILD_DIR)
+$(call rel_obj,$(1)): $(1) $(CFLAGS_STAMP) | $(BUILD_DIR)
 	@echo "  CC   $$<"
 	@mkdir -p $$(@D)
 	@$(CC) $(CFLAGS) -c $$< -o $$@
 endef
 
 define COMPILE_ASM_TEMPLATE
-$(call rel_obj,$(1)): $(1) | $(BUILD_DIR)
+$(call rel_obj,$(1)): $(1) $(CFLAGS_STAMP) | $(BUILD_DIR)
 	@echo "  AS   $$<"
 	@mkdir -p $$(@D)
 	@$(AS) $(ASFLAGS) -c $$< -o $$@
@@ -588,7 +681,7 @@ endef
 $(foreach s,$(ALL_C_SRC),$(eval $(call COMPILE_C_TEMPLATE,$(s))))
 $(foreach s,$(SRC_ASM),$(eval $(call COMPILE_ASM_TEMPLATE,$(s))))
 
-$(BUILD_DIR)/app.elf: $(OBJS) $(LDSCRIPT)
+$(BUILD_DIR)/app.elf: $(OBJS) $(LDSCRIPT) $(LDFLAGS_STAMP)
 	@echo "  LD   $@"
 	@$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 

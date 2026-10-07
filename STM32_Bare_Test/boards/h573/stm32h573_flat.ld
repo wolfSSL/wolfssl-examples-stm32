@@ -8,7 +8,7 @@ ENTRY(Reset_Handler)
 
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 _Min_Heap_Size  = 0x10000;
-_Min_Stack_Size = 0x8000;
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x8000;
 _heap_limit = _estack - _Min_Stack_Size;
 /* H573 startup_stm32h573xx.s references _sstack. */
 _sstack = _estack - _Min_Stack_Size;

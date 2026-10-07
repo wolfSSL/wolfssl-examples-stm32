@@ -11,7 +11,7 @@
 ENTRY(Reset_Handler)
 
 HEAP_SIZE  = 0x2000;   /* 8 KB -- enough for the wolfCrypt test/bench paths */
-STACK_SIZE = 0x8000;   /* 32 KB -- ECC + Dilithium small-stack headroom */
+STACK_SIZE = DEFINED(_stack_size) ? _stack_size : 0x8000;   /* 32 KB -- ECC + Dilithium small-stack headroom */
 
 _Min_Heap_Size  = HEAP_SIZE;
 _Min_Stack_Size = STACK_SIZE;

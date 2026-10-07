@@ -8,7 +8,7 @@ ENTRY(Reset_Handler)
 
 _estack = 0x24080000;    /* 0x24000000 + 512K */
 _Min_Heap_Size  = 0x10000;
-_Min_Stack_Size = 0x10000;
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x10000;
 _heap_limit = _estack - _Min_Stack_Size;
 
 MEMORY

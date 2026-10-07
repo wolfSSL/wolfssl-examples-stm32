@@ -19,7 +19,7 @@
 ENTRY(Reset_Handler)
 
 HEAP_SIZE = 0x10000;   /* 64K heap - wolfCrypt test/bench */
-STACK_SIZE = 0x10000;  /* 64K stack - SP-math ECC KAT frames */
+STACK_SIZE = DEFINED(_stack_size) ? _stack_size : 0x10000;  /* 64K stack - SP-math ECC KAT frames */
 
 /* Aliases for STM32_Bare_Test STACK=1 adapter -- see board_common.c. */
 _Min_Heap_Size  = HEAP_SIZE;

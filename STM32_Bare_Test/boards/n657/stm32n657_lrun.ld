@@ -39,7 +39,7 @@ _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 _sstack = _estack - _Min_Stack_Size;
 
 _Min_Heap_Size = 0x10000; /* 64K heap */
-_Min_Stack_Size = 0x10000; /* 64K stack */
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x10000; /* 64K stack */
 _heap_limit = _estack - _Min_Stack_Size;
 
 /* Memories definition - load to AXISRAM2 base via OpenOCD; no Boot ROM

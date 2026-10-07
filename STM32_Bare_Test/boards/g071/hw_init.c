@@ -3,9 +3,8 @@
  * Copyright (C) 2026 wolfSSL Inc.
  *
  * Direct-register board init for NUCLEO-G071RB:
- *   - HSI16 (16 MHz) as SYSCLK -- no PLL bring-up for first light.
- *     G0 can run to 64 MHz with PLL; can be added later if benchmarks
- *     are wanted.
+ *   - HSI16 (16 MHz) as SYSCLK by default; STM32_BARE_CLK_HZ=64000000
+ *     (make CLK=64) brings up the PLL for the part's 64 MHz maximum.
  *   - USART2 on PA2 (TX) / PA3 (RX) AF1, 115200 8N1, ST-LINK V2-1 VCP.
  *   - Cortex-M0+. No FPU.
  *
@@ -23,6 +22,12 @@
 
 #include "board.h"
 
+/* Makefile CLK= sets this; default is the post-reset HSI16. */
+#ifndef STM32_BARE_CLK_HZ
+#define STM32_BARE_CLK_HZ 16000000
+#endif
+#define G071_SYSCLK_HZ ((uint32_t)STM32_BARE_CLK_HZ)
+
 /* ---- printf retarget over USART2 -------------------------------------- */
 void board_putc(int ch)
 {
@@ -33,10 +38,38 @@ void board_putc(int ch)
 
 static void clock_init(void)
 {
-    /* Stay at HSI16 = 16 MHz. After reset: HSION=1, HSIRDY=1, SW=HSI16.
-     * No flash latency change needed at 16 MHz (0 WS). */
+    /* After reset: HSION=1, HSIRDY=1, SW=HSI16. */
     RCC->CR |= RCC_CR_HSION;
     while ((RCC->CR & RCC_CR_HSIRDY) == 0u) { }
+
+#if STM32_BARE_CLK_HZ == 64000000
+    /* 64 MHz needs 2 flash wait states (RM0444: 1 WS above 24 MHz,
+     * 2 WS above 48 MHz). Raise latency before raising the clock. */
+    FLASH->ACR = (FLASH->ACR & ~FLASH_ACR_LATENCY_Msk) |
+                 (2u << FLASH_ACR_LATENCY_Pos) |
+                 FLASH_ACR_PRFTEN | FLASH_ACR_ICEN;
+    while ((FLASH->ACR & FLASH_ACR_LATENCY_Msk) !=
+           (2u << FLASH_ACR_LATENCY_Pos)) { }
+
+    /* PLL off before reconfiguring. */
+    RCC->CR &= ~RCC_CR_PLLON;
+    while ((RCC->CR & RCC_CR_PLLRDY) != 0u) { }
+
+    /* HSI16 / M=1 * N=8 / R=2 = 64 MHz. VCO at 128 MHz is inside the
+     * 64-344 MHz range. PLLR is encoded as the divider minus one. */
+    RCC->PLLCFGR = RCC_PLLCFGR_PLLSRC_HSI |
+                   (0u << RCC_PLLCFGR_PLLM_Pos) |
+                   (8u << RCC_PLLCFGR_PLLN_Pos) |
+                   (1u << RCC_PLLCFGR_PLLR_Pos) |
+                   RCC_PLLCFGR_PLLREN;
+
+    RCC->CR |= RCC_CR_PLLON;
+    while ((RCC->CR & RCC_CR_PLLRDY) == 0u) { }
+
+    /* Switch SYSCLK to PLLRCLK (SW = 0b010) and wait for SWS to follow. */
+    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW_Msk) | (2u << RCC_CFGR_SW_Pos);
+    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != (2u << RCC_CFGR_SWS_Pos)) { }
+#endif
 }
 
 static void uart_init(void)
@@ -62,9 +95,9 @@ static void uart_init(void)
     RCC->APBENR1 |= RCC_APBENR1_USART2EN;
     (void)RCC->APBENR1;
 
-    /* USART2: 8N1, oversampling 16. PCLK = HCLK = SYSCLK = 16 MHz. */
+    /* USART2: 8N1, oversampling 16. PCLK = HCLK = SYSCLK. */
     USART2->CR1 = 0;
-    USART2->BRR = 16000000u / 115200u;
+    USART2->BRR = G071_SYSCLK_HZ / 115200u;
     USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_UE;
 
     while ((USART2->ISR & (USART_ISR_TEACK | USART_ISR_REACK)) !=
@@ -77,12 +110,12 @@ void board_init(void)
     SystemInit();
     clock_init();
     uart_init();
-    board_common_systick_init(16000000u);
+    board_common_systick_init(G071_SYSCLK_HZ);
 }
 
 uint32_t board_sysclk_hz(void)
 {
-    return 16000000u;
+    return G071_SYSCLK_HZ;
 }
 
 

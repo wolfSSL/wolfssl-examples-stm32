@@ -32,7 +32,7 @@ ENTRY(Reset_Handler)
 _estack = 0x20050000;    /* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size = 0x10000;    /* 64K heap - wolfCrypt test/bench */
-_Min_Stack_Size = 0x10000;   /* 64K stack - SP-math ECC KAT frames */
+_Min_Stack_Size = DEFINED(_stack_size) ? _stack_size : 0x10000;   /* 64K stack - SP-math ECC KAT frames */
 _heap_limit = _estack - _Min_Stack_Size;
 
 /* Specify the memory areas */
