@@ -420,10 +420,9 @@ ifeq ($(TARGET),dhuk)
   # required.
   COMMON_DEFS += -DWOLF_CRYPTO_CB
   # DHUK_UNWRAP=1 opts into the real SAES wrapped-key DECRYPT path (the
-  # unwrap that lands a key in SAES KEYR). It only completes from secure
-  # state, so this is meant for a TZEN=1 board (e.g. the B-U585I-IOT02A,
-  # whose flash is secure-watermarked). Without it the default
-  # CRYPTOCB_UNAVAILABLE stubs are linked.
+  # unwrap that lands a key in SAES KEYR). Verified from non-secure state
+  # (TZEN=0) on u3, u585 and u545; secure state is not required. Without the
+  # flag the default CRYPTOCB_UNAVAILABLE stubs are linked.
   ifeq ($(DHUK_UNWRAP),1)
     COMMON_DEFS += -DWOLFSSL_STM32_DHUK_UNWRAP
   endif

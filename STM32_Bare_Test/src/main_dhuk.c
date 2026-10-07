@@ -28,6 +28,13 @@
  *   [9] wc_Stm32_Aes_Wrap blob used as a key -- asserts a RAW blob unwraps
  *       back to the key it wrapped, guarding the unwrap and blob-order fixes,
  *       with the KEK alternative exercised beside it.
+ *  [12] Key at rest wrapped under the DHUK and unwrapped back into RAM, for
+ *       key material an algorithm outside wolfCrypt has to consume. AES-GCM,
+ *       arbitrary payload length, with a corrupted blob, a wrong seed and a
+ *       wrong key id all required to fail.
+ *  [13] wc_Stm32_Aes_DhukOp_ex exact-key wrap/unwrap over a longer
+ *       block-multiple payload, every block checked against software AES
+ *       keyed with the wrapped key (DHUK_UNWRAP=1 only).
  *
  * A backend that is gated off or unavailable (CRYPTOCB_UNAVAILABLE / a
  * TZEN-secure-context timeout) is reported as an expected soft-PASS, not a
@@ -1520,6 +1527,8 @@ cleanup:
  *   - DhukOp_ex and the crypto-callback device agree byte-for-byte on the
  *     same 32-byte input -- they are the same KEK = DHUK-decrypt(seed)
  *     primitive, so blobs are interchangeable between the two APIs
+ *   - a wc_Stm32_Aes_Wrap blob unwraps back to the exact key it wrapped:
+ *     DhukOp ct == AES-ECB(K, pt) for the K that went into the wrap
  *
  * Ciphertext is silicon-specific, so it is printed rather than pinned; the
  * printed values are what the cross-build (BUILD=bare vs BUILD=cubemx)
@@ -1697,10 +1706,10 @@ static int test_dhuk_op_roundtrip(void)
     }
 
     /* Stage 4: the recovered KEK must equal K, so a plain AES keyed with K
-     * has to produce the same ciphertext. A mismatch here means the unwrap
-     * landed a different key (or the blob byte order disagrees) -- report
-     * it loudly but keep it separate from the round-trip result so the two
-     * failure modes stay distinguishable. */
+     * has to produce the same ciphertext. Anything else means the unwrap
+     * landed a different key and the test fails; the permutations are probed
+     * only so the diagnostic can say whether it is the blob byte order that
+     * disagrees. */
     {
         static const char* names[4] = {
             "K as-is", "K byte-reversed", "K word-order-reversed",
@@ -1753,18 +1762,14 @@ static int test_dhuk_op_roundtrip(void)
             }
         }
         if (ret != 0) {
-            printf("  reference AES-ECB unavailable (%d) -- skipping\n", ret);
-            ret = 0;
+            printf("  reference AES-ECB failed (%d) -- FAIL\n", ret);
+            rc = -1;
         }
-        else if (hit < 0) {
-            /* Informational only. The DHUK contract this API provides is
-             * "seed -> chip-bound KEK", not "wc_Stm32_Aes_Wrap is the exact
-             * inverse of the DhukOp unwrap". On U385 the recovered KEK is
-             * not K under any word/byte permutation, so the two are NOT
-             * inverse operations -- callers must not assume a blob produced
-             * by wc_Stm32_Aes_Wrap unwraps back to its plaintext input. */
-            printf("  note: KEK != K under any word/byte permutation --\n"
-                   "  wc_Stm32_Aes_Wrap is not the inverse of the unwrap\n");
+        else if (hit != 0) {
+            printf("  DhukOp ct != AES-ECB(K as-is, pt) -- FAIL (%s)\n",
+                   (hit < 0) ? "KEK != K under any word/byte permutation"
+                             : names[hit]);
+            rc = -1;
         }
         else {
             printf("  DhukOp ct == AES-ECB(%s, pt)\n", names[hit]);
@@ -1963,6 +1968,436 @@ cleanup:
 }
 #endif /* HAVE_ECC && WOLFSSL_STM32_PKA */
 
+#if defined(WOLF_CRYPTO_CB) && defined(HAVE_AESGCM)
+/* [12] Encrypt a key at rest under the DHUK and recover the PLAINTEXT bytes
+ * into RAM. The other tests here keep the key inside SAES; this is the case
+ * where an algorithm outside wolfCrypt needs the bytes themselves, so the
+ * payload is treated as data rather than as a hardware key.
+ *
+ * The 256-bit value is still only a derivation seed -- SAES mixes it with the
+ * silicon DHUK and the working key exists solely in KEYR -- so the wrapping key
+ * never enters software. Only the payload does, and only while it is in use.
+ *
+ * AES-GCM rather than ECB/CBC for two reasons: the payload length is arbitrary
+ * (ECB/CBC need a multiple of the block size), and the tag detects a corrupted
+ * blob, or one from another seed or key id, instead of handing the caller
+ * garbage key bytes. Both properties are checked below, the second by actually
+ * corrupting a blob. The tag does not detect rollback: an older valid record
+ * for the same key id authenticates too, as nothing here carries a generation
+ * number. */
+static int test_dhuk_keyblob_to_ram(WC_RNG* rng)
+{
+    static const byte seed[32] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,
+        0x10,0x32,0x54,0x76,0x98,0xba,0xdc,0xfe,
+        0xef,0xcd,0xab,0x89,0x67,0x45,0x23,0x01
+    };
+    /* Same length as the seed, one byte different, to show the blob is bound
+     * to the seed it was produced under. */
+    static const byte wrongSeed[32] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,
+        0x10,0x32,0x54,0x76,0x98,0xba,0xdc,0xfe,
+        0xef,0xcd,0xab,0x89,0x67,0x45,0x23,0x02
+    };
+    /* Generated per payload, not fixed. GCM needs a unique nonce for every
+     * payload encrypted under one key: reusing one across two payloads under
+     * the same seed forfeits both confidentiality and the tag. Store it beside
+     * the blob -- it is not secret. */
+    byte iv[12];
+    /* Authenticated, not encrypted: a key id and format version, so a blob
+     * stored under one id cannot be presented as another or under an older
+     * format. A product that also needs rollback protection binds a trusted
+     * monotonic counter in here and rejects records older than its own. */
+    static const byte aad[8]      = { 'k','e','y','i','d','=','7', 0x01 };
+    static const byte wrongAad[8] = { 'k','e','y','i','d','=','8', 0x01 };
+    /* 37 bytes: deliberately not an AES key size and not a block multiple,
+     * which is the shape a proprietary key tends to have. */
+    static const byte propKey[37] = {
+        0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,
+        0x59,0x5a,0x5b,0x5c,0x5d,0x5e,0x5f,0x60,
+        0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,
+        0x69,0x6a,0x6b,0x6c,0x6d,0x6e,0x6f,0x70,
+        0x71,0x72,0x73,0x74,0x75
+    };
+    Aes    aes;
+    byte   work[sizeof(propKey)];
+    byte   blob[sizeof(propKey)];
+    byte   recovered[sizeof(propKey)];
+    byte   tag[16];
+    int    dhukReg = 0;
+    int    ret;
+
+    XMEMSET(blob, 0, sizeof(blob));
+    XMEMSET(recovered, 0, sizeof(recovered));
+    XMEMSET(tag, 0, sizeof(tag));
+
+    ret = wc_RNG_GenerateBlock(rng, iv, (word32)sizeof(iv));
+    if (ret != 0) {
+        printf("  iv generation failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = wc_Stm32_DhukRegister(WC_DHUK_DEVID);
+    if (ret != 0) {
+        printf("  wc_Stm32_DhukRegister failed: %d\n", ret);
+        return ret;
+    }
+    dhukReg = 1;
+
+    /* Provisioning half: wrap the key once. A product does this in the factory
+     * and ships only the blob, the tag, the iv and the seed. */
+    XMEMCPY(work, propKey, sizeof(propKey));
+    ret = wc_AesInit(&aes, NULL, WC_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_AesGcmSetKey(&aes, seed, (word32)sizeof(seed));
+        if (ret == 0) {
+            ret = wc_AesGcmEncrypt(&aes, blob, work, (word32)sizeof(work),
+                                   iv, (word32)sizeof(iv),
+                                   tag, (word32)sizeof(tag),
+                                   aad, (word32)sizeof(aad));
+        }
+        wc_AesFree(&aes);
+    }
+    wc_ForceZero(work, sizeof(work));
+    if (is_expected_gated(ret)) {
+        printf("  AES-GCM gated on this silicon (%d) -- skipping\n", ret);
+        ret = 0;
+        goto cleanup;
+    }
+    if (ret != 0) {
+        printf("  wrap failed: %d\n", ret);
+        goto cleanup;
+    }
+    printf("  wrapped %u-byte key (no length padding needed)\n",
+           (unsigned int)sizeof(propKey));
+
+    /* Runtime half: recover the bytes into a buffer the caller owns. */
+    ret = wc_AesInit(&aes, NULL, WC_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_AesGcmSetKey(&aes, seed, (word32)sizeof(seed));
+        if (ret == 0) {
+            ret = wc_AesGcmDecrypt(&aes, recovered, blob, (word32)sizeof(blob),
+                                   iv, (word32)sizeof(iv),
+                                   tag, (word32)sizeof(tag),
+                                   aad, (word32)sizeof(aad));
+        }
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  unwrap failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(recovered, propKey, sizeof(propKey)) != 0) {
+        printf("  recovered key does not match the original -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  unwrapped into RAM, matches the original\n");
+
+    /* A corrupted blob must be rejected, not silently returned as key bytes. */
+    blob[0] ^= 0x01;
+    XMEMSET(recovered, 0, sizeof(recovered));
+    ret = wc_AesInit(&aes, NULL, WC_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_AesGcmSetKey(&aes, seed, (word32)sizeof(seed));
+        if (ret == 0) {
+            ret = wc_AesGcmDecrypt(&aes, recovered, blob, (word32)sizeof(blob),
+                                   iv, (word32)sizeof(iv),
+                                   tag, (word32)sizeof(tag),
+                                   aad, (word32)sizeof(aad));
+        }
+        wc_AesFree(&aes);
+    }
+    blob[0] ^= 0x01;
+    if (expect_ret("corrupted blob rejected", ret, AES_GCM_AUTH_E) != 0) {
+        ret = -1;
+        goto cleanup;
+    }
+
+    /* The blob is bound to its seed (and through the seed, to this silicon). */
+    XMEMSET(recovered, 0, sizeof(recovered));
+    ret = wc_AesInit(&aes, NULL, WC_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_AesGcmSetKey(&aes, wrongSeed, (word32)sizeof(wrongSeed));
+        if (ret == 0) {
+            ret = wc_AesGcmDecrypt(&aes, recovered, blob, (word32)sizeof(blob),
+                                   iv, (word32)sizeof(iv),
+                                   tag, (word32)sizeof(tag),
+                                   aad, (word32)sizeof(aad));
+        }
+        wc_AesFree(&aes);
+    }
+    if (expect_ret("wrong seed rejected", ret, AES_GCM_AUTH_E) != 0) {
+        ret = -1;
+        goto cleanup;
+    }
+
+    /* The key id is authenticated, so a blob stored under one id cannot be
+     * presented as another. */
+    XMEMSET(recovered, 0, sizeof(recovered));
+    ret = wc_AesInit(&aes, NULL, WC_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_AesGcmSetKey(&aes, seed, (word32)sizeof(seed));
+        if (ret == 0) {
+            ret = wc_AesGcmDecrypt(&aes, recovered, blob, (word32)sizeof(blob),
+                                   iv, (word32)sizeof(iv),
+                                   tag, (word32)sizeof(tag),
+                                   wrongAad, (word32)sizeof(wrongAad));
+        }
+        wc_AesFree(&aes);
+    }
+    if (expect_ret("wrong key id rejected", ret, AES_GCM_AUTH_E) != 0) {
+        ret = -1;
+        goto cleanup;
+    }
+    ret = 0;
+
+cleanup:
+    wc_ForceZero(work, sizeof(work));
+    wc_ForceZero(recovered, sizeof(recovered));
+    if (dhukReg) {
+        wc_Stm32_DhukUnRegister(WC_DHUK_DEVID);
+    }
+    return ret;
+}
+#endif /* WOLF_CRYPTO_CB && HAVE_AESGCM */
+
+#if defined(WOLFSSL_STM32_DHUK_UNWRAP)
+/* [13] The exact-key alternative to [12]. Provisioning wraps a chosen key once
+ * with wc_Stm32_Aes_Wrap_ex() and keeps the blob; at runtime the blob (not the
+ * key) is staged in aes->key and wc_Stm32_Aes_DhukOp_ex() unwraps it inside
+ * KEYR -- the key never enters software -- and ciphers the caller's buffer
+ * with it. Test [6] covers a single 32-byte block; a product wrapping a real
+ * payload needs more than one, so this runs a four-block buffer through ECB
+ * and CBC, checks every block against software AES-256 keyed with the chosen
+ * key (a round-trip alone cannot tell a correct unwrap from a no-op), and
+ * checks both round-trip.
+ *
+ * Two differences from [12] decide which to use: this path requires the payload
+ * to be a multiple of the AES block size, and it carries no integrity tag, so a
+ * corrupted blob yields wrong bytes silently rather than an error. */
+static int test_dhuk_op_longpayload(void)
+{
+    static const byte kekIn[32] = {
+        0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,
+        0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c,
+        0x60,0x3d,0xeb,0x10,0x15,0xca,0x71,0xbe,
+        0x2b,0x73,0xae,0xf0,0x85,0x7d,0x77,0x81
+    };
+    static const byte iv0[16] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
+    };
+    /* 64 bytes: four blocks, so a multi-block CBC chain is actually exercised
+     * rather than the single block test [6] covers. */
+    static const byte payload[64] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,
+        0x01,0x12,0x23,0x34,0x45,0x56,0x67,0x78,
+        0x89,0x9a,0xab,0xbc,0xcd,0xde,0xef,0xf0,
+        0x02,0x13,0x24,0x35,0x46,0x57,0x68,0x79,
+        0x8a,0x9b,0xac,0xbd,0xce,0xdf,0xe0,0xf1,
+        0x03,0x14,0x25,0x36,0x47,0x58,0x69,0x7a,
+        0x8b,0x9c,0xad,0xbe,0xcf,0xd0,0xe1,0xf2
+    };
+    Aes    aes;
+    byte   kekBlob[sizeof(kekIn)];
+    byte   blob[sizeof(payload)];
+    byte   ref[sizeof(payload)];
+    byte   back[sizeof(payload)];
+    word32 kekBlobSz = 0;
+    int    ret;
+
+    XMEMSET(kekBlob, 0, sizeof(kekBlob));
+    XMEMSET(blob, 0, sizeof(blob));
+    XMEMSET(ref, 0, sizeof(ref));
+    XMEMSET(back, 0, sizeof(back));
+
+    /* No device registration here: wc_Stm32_Aes_DhukOp_ex drives SAES directly
+     * rather than dispatching through the crypto-callback device. */
+
+    /* Provisioning: wrap the chosen key under the DHUK. RAW order is the blob
+     * format DhukOp_ex unwraps; the blob is what the runtime half stages. */
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        ret = wc_Stm32_Aes_Wrap_ex(&aes, kekIn, (word32)sizeof(kekIn),
+                                   kekBlob, &kekBlobSz, NULL, 0,
+                                   WC_STM32_WRAP_ORDER_RAW);
+        wc_AesFree(&aes);
+    }
+    if (is_expected_gated(ret)) {
+        printf("  wc_Stm32_Aes_Wrap_ex gated on this silicon (%d) -- "
+               "skipping\n", ret);
+        ret = 0;
+        goto cleanup;
+    }
+    if (ret != 0) {
+        printf("  wc_Stm32_Aes_Wrap_ex failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (kekBlobSz != sizeof(kekBlob)) {
+        printf("  wc_Stm32_Aes_Wrap_ex outSz %u, want %u -- FAIL\n",
+               (unsigned int)kekBlobSz, (unsigned int)sizeof(kekBlob));
+        ret = -1;
+        goto cleanup;
+    }
+
+    /* ECB, four blocks. */
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        XMEMCPY(aes.key, kekBlob, sizeof(kekBlob));
+        aes.keylen = 32;
+        ret = wc_Stm32_Aes_DhukOp_ex(&aes, blob, payload,
+                                     (word32)sizeof(payload), 1, 0);
+        wc_AesFree(&aes);
+    }
+    if (is_expected_gated(ret)) {
+        printf("  DhukOp gated on this silicon (%d) -- skipping\n", ret);
+        ret = 0;
+        goto cleanup;
+    }
+    if (ret != 0) {
+        printf("  DhukOp ECB encrypt failed: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* The unwrapped key must be kekIn itself, so software AES-256 keyed with
+     * kekIn has to produce the same four blocks. A no-op or first-block-only
+     * unwrap still round-trips below; this is what catches it. */
+    ret = wc_AesInit(&aes, NULL, INVALID_DEVID);
+    if (ret == 0) {
+        ret = wc_AesSetKey(&aes, kekIn, (word32)sizeof(kekIn), NULL,
+                           AES_ENCRYPTION);
+        if (ret == 0) {
+            ret = wc_AesEcbEncrypt(&aes, ref, payload, (word32)sizeof(payload));
+        }
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  reference AES-ECB failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(blob, ref, sizeof(ref)) != 0) {
+        printf("  DhukOp ECB ct != AES-ECB(kekIn, payload) -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  DhukOp ECB ct == AES-ECB(kekIn, payload) over %u bytes\n",
+           (unsigned int)sizeof(payload));
+
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        XMEMCPY(aes.key, kekBlob, sizeof(kekBlob));
+        aes.keylen = 32;
+        ret = wc_Stm32_Aes_DhukOp_ex(&aes, back, blob,
+                                     (word32)sizeof(blob), 0, 0);
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  DhukOp ECB decrypt failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(back, payload, sizeof(payload)) != 0) {
+        printf("  ECB round-trip did not recover the payload -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  ECB round-trip OK over %u bytes\n",
+           (unsigned int)sizeof(payload));
+
+    /* CBC over the same payload, so the IV chain is exercised across blocks. */
+    XMEMSET(blob, 0, sizeof(blob));
+    XMEMSET(ref, 0, sizeof(ref));
+    XMEMSET(back, 0, sizeof(back));
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        XMEMCPY(aes.key, kekBlob, sizeof(kekBlob));
+        aes.keylen = 32;
+        XMEMCPY(aes.reg, iv0, sizeof(iv0));
+        ret = wc_Stm32_Aes_DhukOp_ex(&aes, blob, payload,
+                                     (word32)sizeof(payload), 1, 1);
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  DhukOp CBC encrypt failed: %d\n", ret);
+        goto cleanup;
+    }
+    ret = wc_AesInit(&aes, NULL, INVALID_DEVID);
+    if (ret == 0) {
+        ret = wc_AesSetKey(&aes, kekIn, (word32)sizeof(kekIn), iv0,
+                           AES_ENCRYPTION);
+        if (ret == 0) {
+            ret = wc_AesCbcEncrypt(&aes, ref, payload, (word32)sizeof(payload));
+        }
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  reference AES-CBC failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(blob, ref, sizeof(ref)) != 0) {
+        printf("  DhukOp CBC ct != AES-CBC(kekIn, iv0, payload) -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  DhukOp CBC ct == AES-CBC(kekIn, iv0, payload) over %u bytes\n",
+           (unsigned int)sizeof(payload));
+
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        XMEMCPY(aes.key, kekBlob, sizeof(kekBlob));
+        aes.keylen = 32;
+        XMEMCPY(aes.reg, iv0, sizeof(iv0));
+        ret = wc_Stm32_Aes_DhukOp_ex(&aes, back, blob,
+                                     (word32)sizeof(blob), 0, 1);
+        wc_AesFree(&aes);
+    }
+    if (ret != 0) {
+        printf("  DhukOp CBC decrypt failed: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(back, payload, sizeof(payload)) != 0) {
+        printf("  CBC round-trip did not recover the payload -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  CBC round-trip OK over %u bytes (IV chained)\n",
+           (unsigned int)sizeof(payload));
+
+    /* No integrity tag on this path: a corrupted blob decrypts to wrong bytes
+     * with no error, which is the practical reason to prefer [12]'s AEAD. */
+    blob[0] ^= 0x01;
+    ret = wc_AesInit(&aes, NULL, WOLFSSL_DHUK_DEVID);
+    if (ret == 0) {
+        XMEMCPY(aes.key, kekBlob, sizeof(kekBlob));
+        aes.keylen = 32;
+        XMEMCPY(aes.reg, iv0, sizeof(iv0));
+        ret = wc_Stm32_Aes_DhukOp_ex(&aes, back, blob,
+                                     (word32)sizeof(blob), 0, 1);
+        wc_AesFree(&aes);
+    }
+    blob[0] ^= 0x01;
+    if (ret != 0) {
+        printf("  corrupted-blob decrypt errored unexpectedly: %d\n", ret);
+        goto cleanup;
+    }
+    if (XMEMCMP(back, payload, sizeof(payload)) == 0) {
+        printf("  corrupted blob still decrypted to the payload -- FAIL\n");
+        ret = -1;
+        goto cleanup;
+    }
+    printf("  corrupted blob returns wrong bytes with no error "
+           "(no integrity tag on this path)\n");
+    ret = 0;
+
+cleanup:
+    wc_ForceZero(back, sizeof(back));
+    return ret;
+}
+#endif /* WOLFSSL_STM32_DHUK_UNWRAP */
+
 #endif /* WOLFSSL_DHUK && (BARE || CUBEMX) && WC_STM32_HAS_DHUK */
 
 
@@ -2071,6 +2506,18 @@ int main(void)
         if (ret == 0) {
             printf("\n[8] Provisioning reference (start here):\n");
             ret = dhuk_provision_example(&rng);
+        }
+#endif
+#if defined(WOLF_CRYPTO_CB) && defined(HAVE_AESGCM)
+        if (ret == 0) {
+            printf("\n[12] Key wrapped at rest, unwrapped into RAM:\n");
+            ret = test_dhuk_keyblob_to_ram(&rng);
+        }
+#endif
+#ifdef WOLFSSL_STM32_DHUK_UNWRAP
+        if (ret == 0) {
+            printf("\n[13] wc_Stm32_Aes_DhukOp_ex over a longer payload:\n");
+            ret = test_dhuk_op_longpayload();
         }
 #endif
 

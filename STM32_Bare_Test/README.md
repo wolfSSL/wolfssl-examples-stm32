@@ -15,8 +15,8 @@ HW ECDSA-sign; `l552` and `h573` have no board available).
 |--------|---------------|---------------|----------------------------------------------------|
 | `u5`   | STM32U575ZI   | Validated 6/3 | NUCLEO-U575ZI-Q. HASH + RNG (no AES). Slow SW ECC   |
 | `u3`   | STM32U385RG   | Validated 6/3 | NUCLEO-U385RG-Q. TinyAES + HASH + RNG + SAES + PKA. Full DHUK pass + CCB ECDSA (bare + cubemx) |
-| `u545` | STM32U545RE   | Validated 6/3 | NUCLEO-U545RE-Q. + DHUK: PKA sign OK, SAES backend gated (-107) |
-| `u585` | STM32U585AI   | Validated 6/3 | B-U585I-IOT02A. + DHUK: PKA sign OK, SAES backend gated (-107) |
+| `u545` | STM32U545RE   | Validated 6/3 | NUCLEO-U545RE-Q. + DHUK: full pass (SAES + PKA), `DHUK_UNWRAP=1` from non-secure state |
+| `u585` | STM32U585AI   | Validated 6/3 | B-U585I-IOT02A. + DHUK: full pass (SAES + PKA), `DHUK_UNWRAP=1` from non-secure state |
 | `f207` | STM32F207ZG   | Validated 6/3 | NUCLEO-F207ZG. RNG only (Cortex-M3)                |
 | `f303` | STM32F303ZE   | Validated 6/3 | NUCLEO-F303ZE. RNG only. VCP routes (no ext serial needed) |
 | `f437` | STM32F437IIHx | Validated 6/3 | STM32439I-EVAL. CRYP + HASH + RNG. UART via ext USB-serial |
@@ -48,10 +48,11 @@ HW ECDSA-sign; `l552` and `h573` have no board available).
 blocks are only on the G4A1xx variant in the same G491/G4A1 product line.
 BARE on G491RE only accelerates RNG.
 
-DHUK (`TARGET=dhuk`) is fully validated on `u3` (GMAC + AES-ECB + ECDSA all
-routed through SAES/PKA). On `u545` and `u585` the plain PKA sign/verify path
-works but the SAES DHUK key derivation reports backend-gated (`-107`), expected
-without TrustZone/provisioning on those parts.
+DHUK (`TARGET=dhuk`) is fully validated on `u3`, `u545` and `u585` (GMAC +
+AES-ECB + ECDSA all routed through SAES/PKA), including `DHUK_UNWRAP=1` from
+non-secure state. The `-107` backend gating the two U5 boards once reported
+was a missing kernel clock -- SAES on U3/U5 runs from the SHSI, which the bare
+driver now enables -- not a TrustZone or provisioning requirement.
 
 CCB (`TARGET=ccb`) is validated on `u3` on both build paths (bare and CubeMX):
 a P-256 key is provisioned on-chip with the standard `wc_ecc_make_key` (the crypto callback intercepts it) and signed through
@@ -176,7 +177,7 @@ has nothing to accelerate.
 |--------|-------------------|------------------------------------------------------------------------------|
 | `test` | `src/main_test.c` | wolfCrypt KATs (SHA-256, AES, RNG) plus the full `wolfcrypt_test` suite.      |
 | `bench`| `src/main_bench.c`| The wolfCrypt benchmark suite.                                               |
-| `dhuk` | `src/main_dhuk.c` | Transparent DHUK crypto-callback: GMAC, AES-ECB, and ECDSA sign.            |
+| `dhuk` | `src/main_dhuk.c` | Transparent DHUK crypto-callback: GMAC, AES-ECB, ECDSA sign, and key-at-rest wrap/unwrap. |
 | `mtls` | `src/main_mtls.c` | TLS 1.3 mutual auth, client and server in one image over an in-memory transport. DHUK-wrapped client key where the silicon has it, ordinary key elsewhere. |
 | `ccb`  | `src/main_ccb.c`  | Transparent CCB-protected ECDSA (P-256) via `wc_ecc_sign_hash` -- bare + CubeMX. |
 | `ccbhal`| `src/main_ccbhal.c`| CubeMX `HAL_CCB_*` reference flow (provision + sign + SW-verify), `u3` only. |
@@ -211,6 +212,17 @@ make BOARD=u3 BUILD=cubemx CONFIG=bare TARGET=cubecrypto flash
 The DHUK AES-GCM path handles full (nonzero) payloads, not just GMAC: the SAES runs H, E(J0) and the CTR keystream under the device-derived key while GHASH runs in software, so `wc_AesGcmEncrypt` / `wc_AesGcmDecrypt` on a `WC_DHUK_DEVID` `Aes` produce a device-bound AEAD whose key never enters software (exercised by `TARGET=cbonly` below).
 
 The optional exact-key import primitive (`wc_Stm32_Aes_DhukOp`, imports an externally-chosen key rather than deriving from a seed) stays gated behind `-DWOLFSSL_STM32_DHUK_UNWRAP` and is off by default.
+
+Two different protections are available, and which one applies depends on whether the application needs the key *bytes*:
+
+- **Key stays in hardware.** A chosen AES-256 key is wrapped with `wc_Stm32_Aes_Wrap_ex()` and the blob handed straight back to `wc_AesSetKey()` on a `WC_DHUK_DEVID` `Aes`, so SAES loads it into `KEYR`. The key never reaches RAM, but only the AES engine can use it. Flow `[B]` of test `[8]`.
+- **Key unwrapped into RAM.** The DHUK-derived key acts as a KEK: the payload is encrypted under it at provisioning and decrypted back into a caller-owned buffer at runtime. The KEK itself still never enters software -- only the payload does, and only while it is in use. This is the generic route for key material the AES engine cannot hold: a 128-bit key, an ECC scalar (flow `[C]`), or a key belonging to an algorithm outside wolfCrypt. Flow `[B2]` of test `[8]`, and test `[9]`. For an ECC scalar specifically, parts with a CCB (`u3`) can keep the scalar out of software altogether by unwrapping it SAES->PKA in hardware; see "CCB-protected ECDSA" below.
+
+Test `[12]` is the second pattern in the form a product usually needs it. It uses AES-GCM rather than raw ECB, which buys two things: the payload length is arbitrary (ECB and CBC both require a multiple of the block size, so a key that is not AES-shaped would otherwise need a padding convention), and the tag rejects a corrupted blob, or one produced under another seed or stored under another key id, instead of returning garbage key bytes. It wraps a deliberately awkward 37-byte key and proves both properties, the second by corrupting a blob, by decrypting under the wrong seed and by presenting the blob under the wrong key id -- each must fail with `AES_GCM_AUTH_E`. What the tag does not cover is rollback: an older valid `{iv, blob, tag}` for the same key id authenticates just as well, because nothing in the record carries a generation number. A product that needs rollback protection binds a trusted monotonic counter into the AAD and rejects records older than its stored value.
+
+Test `[12]` generates a fresh IV per payload from the TRNG and stores it beside the blob. That is not incidental: AES-GCM needs a unique nonce for every payload encrypted under one key, and reusing one across two payloads under the same seed forfeits both confidentiality and the tag. The IV is not secret, so it can sit in flash next to the blob.
+
+`wc_Stm32_Aes_DhukOp_ex()` is the exact-key form of the KEK pattern: rather than deriving from a seed, it unwraps a blob inside `KEYR` and ciphers with the key that blob wrapped. Provisioning is a separate step -- wrap the chosen key `K` once with `wc_Stm32_Aes_Wrap_ex()` in `WC_STM32_WRAP_ORDER_RAW` order and store the 32-byte blob; at runtime stage that blob, not `K`, in `aes->key` and call `wc_Stm32_Aes_DhukOp_ex()`. Test `[6]` asserts the identity, failing unless `DhukOp ct == AES-ECB(K as-is, pt)`; test `[13]` does the same over a four-block payload through ECB and CBC, comparing every block against software AES-256 keyed with `K`. Both need `DHUK_UNWRAP=1` and are verified on `u3`, `u585` and `u545` from non-secure state. The path requires block-multiple payloads and carries no integrity tag -- `[13]` demonstrates that a corrupted blob decrypts to wrong bytes with no error -- so test `[12]`'s AEAD route is the better default.
 
 ```
 make BOARD=u3 CONFIG=bare TARGET=dhuk flash
