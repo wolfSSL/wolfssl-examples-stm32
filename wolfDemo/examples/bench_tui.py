@@ -145,6 +145,12 @@ re_ed25519 = re.compile(
     r"(?P<ops>\d+)\s+ops took\s+(?P<sec>[\d.]+)\s+sec,.*?,\s+(?P<rate>[\d.]+)\s+ops/sec"
     + mem_suffix
 )
+# DRBG instantiate + free, e.g. "RNG 256 SHA256 Init/Free 404 ops took ..."
+re_rng_ops = re.compile(
+    r"^RNG\s+(?P<bits>\d+)\s+(?P<hash>SHA\d+)\s+(?P<op>Init/Free)\s+"
+    r"(?P<ops>\d+)\s+ops took\s+(?P<sec>[\d.]+)\s+sec,.*?,\s+(?P<rate>[\d.]+)\s+ops/sec"
+    + mem_suffix
+)
 
 re_reset = re.compile(r"wolfcrypt benchmark", re.IGNORECASE)
 
@@ -203,11 +209,15 @@ def norm_mldsa(m):
     return _attach_mem(d, m)
 
 def norm_curve25519(m):
-    d = {"algo": f"CURVE 25519", "mode": m.group("op"), "result": f'{float(m.group("rate")):.3f} ops/s'}
+    d = {"algo": f"CURVE {m.group('param')}", "mode": m.group("op"), "result": f'{float(m.group("rate")):.3f} ops/s'}
     return _attach_mem(d, m)
 
 def norm_ed25519(m):
-    d = {"algo": f"ED 25519", "mode": m.group("op"), "result": f'{float(m.group("rate")):.3f} ops/s'}
+    d = {"algo": f"ED {m.group('param')}", "mode": m.group("op"), "result": f'{float(m.group("rate")):.3f} ops/s'}
+    return _attach_mem(d, m)
+
+def norm_rng_ops(m):
+    d = {"algo": "RNG", "mode": f"{m.group('hash')} {m.group('op')}", "result": f'{float(m.group("rate")):.3f} ops/s'}
     return _attach_mem(d, m)
 
 def parse_line(s):
@@ -216,7 +226,8 @@ def parse_line(s):
     if re_reset.search(s): return {"reset": True}
     for rx, fn in ((re_stream,norm_stream),(re_rsa,norm_rsa),(re_dh,norm_dh),
                    (re_ecc,norm_ecc),(re_mlkem,norm_mlkem),(re_mldsa,norm_mldsa),
-                   (re_curve25519,norm_curve25519),(re_ed25519,norm_ed25519)):
+                   (re_curve25519,norm_curve25519),(re_ed25519,norm_ed25519),
+                   (re_rng_ops,norm_rng_ops)):
         m = rx.match(s)
         if m: return fn(m)
     return None
