@@ -1,0 +1,41 @@
+# Shows the wolfDemo wolfCrypt benchmark full screen on the HDMI display, in
+# the foot terminal under the cage kiosk compositor. Installed by setup.sh,
+# which fills in @THEME@.
+
+[Unit]
+Description=wolfDemo wolfCrypt benchmark display
+After=console-setup.service getty@tty1.service seatd.service
+Requires=seatd.service
+Conflicts=getty@tty1.service
+
+[Service]
+User=wolfdemo
+# cage gets the display and tty1 from seatd, so no login session is needed.
+# A logind session would wait for a user service manager, which takes minutes
+# while a Pi Zero is booting.
+Environment=LIBSEAT_BACKEND=seatd
+RuntimeDirectory=wolfdemo-display
+RuntimeDirectoryMode=0700
+StateDirectory=wolfdemo
+Environment=XDG_RUNTIME_DIR=/run/wolfdemo-display HOME=/var/lib/wolfdemo
+# The invisible mouse pointer installed by setup.sh
+Environment=XCURSOR_PATH=/opt/wolfdemo/icons XCURSOR_THEME=default
+# -d stops foot from drawing a title bar, which would leave a strip at the
+# bottom of the screen
+ExecStart=/usr/bin/cage -d -- /usr/bin/foot --config=/opt/wolfdemo/foot.ini \
+    /usr/bin/python3 /opt/wolfdemo/bench_tui.py --@THEME@ \
+    --logo /opt/wolfdemo/wolfssl_logo.png /dev/wolfdemo 115200
+# The Pi Zero has a single core, keep background jobs from delaying the display
+Nice=-10
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
