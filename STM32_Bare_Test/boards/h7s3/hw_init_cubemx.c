@@ -95,6 +95,23 @@ static int uart_init_cubemx(void)
  * WC_HW_E (-248). */
 static int pka_init_cubemx(void)
 {
+    RCC_OscInitTypeDef osc = {0};
+
+    /* The V2 PKA self-check (SR.INITOK) needs the RNG running: HSI48 kernel
+     * clock, RNG bus clock and RNGEN, as in ST's PKA_ECDSA_Sign example.
+     * Without it HAL_PKA_Init fails and the first PKA operation spins in the
+     * HAL forever. */
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
+    osc.HSI48State = RCC_HSI48_ON;
+    osc.PLL1.PLLState = RCC_PLL_NONE;
+    osc.PLL2.PLLState = RCC_PLL_NONE;
+    osc.PLL3.PLLState = RCC_PLL_NONE;
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
+        return -1;
+    }
+    __HAL_RCC_RNG_CLK_ENABLE();
+    RNG->CR |= RNG_CR_RNGEN;
+
     __HAL_RCC_PKA_CLK_ENABLE();
     if (HAL_PKA_Init(&hpka) != HAL_OK) {
         return -1;

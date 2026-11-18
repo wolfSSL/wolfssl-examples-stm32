@@ -332,6 +332,11 @@ ifneq ($(STACK_SZ),)
 else
   LD_EXTRA :=
 endif
+# HEAP_SZ overrides the heap carve on boards whose linker script honours
+# _heap_size (c5a3), as a decimal byte count.
+ifneq ($(HEAP_SZ),)
+  LD_EXTRA += -Wl,--defsym=_heap_size=$(HEAP_SZ)
+endif
 
 # CLK selects a non-default SYSCLK where the board supports it. Only g071
 # implements it so far: CLK=64 brings up the PLL for 64 MHz instead of
