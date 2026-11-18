@@ -1,0 +1,2 @@
+# The CH340 USB UART on the wolfDemo board appears as /dev/wolfdemo
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="wolfdemo"

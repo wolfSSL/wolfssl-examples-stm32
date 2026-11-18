@@ -41,11 +41,13 @@ be backed-up too.
 ## [bench_tui.py](bench_tui.py)
 
 This script takes the live wolfCrypt benchmark output via UART and displays it
-in a easy to consume table form. This requires Python `rich` to be installed
-using the following, or by using your package manager:
+in an easy-to-consume table form. If the board is not plugged in, or is
+unplugged, it waits for the board to be connected. This requires Python
+`pyserial` to be installed using the following, or by using your package
+manager:
 
 ```
-pip3 install rich
+pip3 install pyserial
 ```
 
 Usage (in Linux):
@@ -66,7 +68,7 @@ pnputil /enum-devices /class Ports
 3. Install dependencies (PowerShell or Command Prompt):
 
 ```
-pip install rich pyserial
+pip install pyserial
 ```
 
 4. Run:
@@ -94,10 +96,36 @@ A demo mode can be executed using:
 python bench_tui.py --demo
 ```
 
+There are also options for a nicer look in terminals that support 24-bit
+colour:
+
+* `--light` or `--dark` use 24-bit colours designed for a white or black
+  background, with background colours for the zebra striping and the newest
+  result.
+* `--logo wolfssl_logo.png` draws the wolfSSL logo image at the top, in
+  terminals that support sixel graphics and report their character cell size,
+  such as foot. This needs Python `pillow` (`pip3 install pillow`). With
+  `--dark`, the black parts of the logo are drawn in white. Other terminals,
+  and Windows, show a logo drawn with text characters instead.
+
+```
+python bench_tui.py --light --logo wolfssl_logo.png /dev/ttyUSB0 115200
+```
+
+## [pi-display](pi-display)
+
+Setup scripts to turn a Raspberry Pi Zero into a standalone display for the
+wolfDemo board. It runs `bench_tui.py` full screen on an HDMI monitor at boot,
+with the wolfSSL logo, when the board is plugged into the Pi's USB port.
+
 ## [bench_tpm_tui.py](bench_tpm_tui.py)
 
 This is very similar to `bench_tui.py`, but is designed to work with the
-wolfTPM benchmark output.
+wolfTPM benchmark output. It also requires Python `rich`:
+
+```
+pip3 install rich pyserial
+```
 
 Usage (in Linux):
 
