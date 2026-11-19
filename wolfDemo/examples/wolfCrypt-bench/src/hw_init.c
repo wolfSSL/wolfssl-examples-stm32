@@ -50,8 +50,10 @@ static void Error_Handler(void)
     while (1) { __NOP(); }
 }
 
-/* UART printf retarget. Each '\n' is sent as "\r\n" for serial terminals and
- * moves the LED bars on one step, so the LEDs track the benchmark output. */
+/* UART printf retarget. Each '\n' is sent as "\r\n" for serial terminals.
+ * Once each line is out the wolf barks on the LED bars, so the LEDs track the
+ * benchmark output. The bark blocks, which keeps it out of the benchmark's
+ * timed sections. */
 int __io_putchar(int ch)
 {
     uint8_t c = (uint8_t)ch;
@@ -68,9 +70,11 @@ int _write(int file, char *ptr, int len)
     for (i = 0; i < len; i++) {
         if (ptr[i] == '\n') {
             __io_putchar('\r');
-            leds_step();
         }
         __io_putchar(ptr[i]);
+        if (ptr[i] == '\n') {
+            leds_bark();
+        }
     }
     return len;
 }

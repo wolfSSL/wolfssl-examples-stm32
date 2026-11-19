@@ -19,7 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
-/* Minimal interrupt handlers for STM32U585. TIM6_IRQHandler is in leds.c. */
+/* Minimal interrupt handlers for STM32U585 */
 #include "stm32u5xx_hal.h"
 
 void NMI_Handler(void)           { }

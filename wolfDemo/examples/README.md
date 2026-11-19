@@ -17,17 +17,17 @@ source tree and the STM32CubeU5 package, and can also build a pure software
 variant and the wolfCrypt self-test. See its [README](wolfCrypt-bench/README.md)
 for details.
 
-Each log line output will cycle the LED "bark bars" one step. Log data will be
-output on the USB's UART at 115200bps. Hold BT2 during reset for an LED-only
-demo.
+Each log line output makes the wolf bark, fading the LED "bark bars" from the
+smallest to the largest. Log data will be output on the USB's UART at
+115200bps. Hold BT2 during reset for an LED-only demo.
 
 ## [wolfTPM-bench](wolfTPM-bench)
 
 This runs the wolfTPM benchmark. It requires the wolfDemo ST33K TPM addon board
 to be inserted in mikroBus socket 1. It talks to this board via SPI.
 
-As with the wolfCrypt-bench, each log line will cycle the LED "bark bars" one
-step. The log data will also be output on the USB's UART at 115200bps.
+Each log line will cycle the LED "bark bars" one step. The log data will also
+be output on the USB's UART at 115200bps.
 
 ### NOTE
 

@@ -21,8 +21,9 @@
 
 /*
  * Runs the wolfCrypt benchmark on the wolfDemo board in a loop, with a pause
- * between runs. Output goes to USART1 (the USB-C port) and each line steps
- * the LED bars. Hold BT2 during reset for the LED-only demo instead.
+ * between runs. Output goes to USART1 (the USB-C port) and each line makes
+ * the wolf bark on the LED bars. Hold BT2 during reset for the LED-only demo
+ * instead.
  */
 
 #include "stm32u5xx_hal.h"
