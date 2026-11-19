@@ -5,8 +5,13 @@ Bare-metal wolfCrypt benchmark and self-test for the **wolfDemo** board
 engines (AES, HASH, PKA and TRNG).
 
 The benchmark runs in a loop with a 5 second pause between runs. Each line of
-output steps the LED "bark bars" along, and the output can be shown as a live
-table with [bench_tui.py](../bench_tui.py).
+output makes the wolf bark, a quick fade along the LED "bark bars" from the
+smallest to the largest. The output can be shown as a live table with
+[bench_tui.py](../bench_tui.py).
+
+Each bark takes about a third of a second and holds up the output while it
+runs. The benchmark stops its timer before it prints each result, so the
+barks make each run longer but do not change the results.
 
 ## Board
 
@@ -18,7 +23,7 @@ table with [bench_tui.py](../bench_tui.py).
 | UART | USART1 - PA9 (TX), PA10 (RX) via the CH340G on the USB-C port, 115200 8N1 |
 | Clock | HSE 8 MHz -> PLL1 -> 160 MHz, HSI48 for the TRNG |
 | Crypto HW | AES (TinyAES), HASH, PKA, TRNG |
-| LEDs | PB12, PB13, PB14, PB15 (right to left) |
+| LEDs | PB12, PB13, PB14, PB15 (right to left, smallest bar to largest) |
 | Buttons | BT1 - PB4, BT2 - PB5 |
 
 ## Requirements
@@ -135,6 +140,8 @@ STM32CubeProgrammer or `stm32flash`:
 stm32flash /dev/ttyUSB0 -b115200 -w build/bench-hw/app.hex
 ```
 
+On macOS the port is `/dev/cu.usbserial-*` instead of `/dev/ttyUSB0`.
+
 Then set the switch back to "RUN" and press RESET.
 
 ## Example Results
@@ -170,7 +177,7 @@ wolfCrypt-bench/
 |   |-- main_test.c          # wolfCrypt self-test entry
 |   |-- board.h              # Board support API
 |   |-- hw_init.c            # Clock, GPIO, UART, printf retarget, crypto MSP
-|   |-- leds.c               # LED bar stepping and the BT2 LED demo
+|   |-- leds.c               # LED bark for each line and the BT2 LED demo
 |   |-- stubs.c              # _sbrk, time() and file syscall stubs
 |   |-- stm32u5xx_hal_conf.h # HAL module selection
 |   |-- stm32u5xx_it.c       # Interrupt handlers (SysTick)

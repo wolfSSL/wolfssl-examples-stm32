@@ -40,7 +40,7 @@ void hw_init(void);
 int  board_bt2_pressed(void);
 
 /* leds.c */
-void leds_step(void);
+void leds_bark(void);
 void leds_fade_run(void);
 
 #endif /* WOLFDEMO_BOARD_H */
