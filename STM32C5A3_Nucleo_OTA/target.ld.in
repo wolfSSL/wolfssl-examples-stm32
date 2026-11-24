@@ -1,0 +1,158 @@
+/* target.ld.in
+ *
+ * Copyright (C) 2006-2026 wolfSSL Inc.
+ *
+ * This file is part of wolfSSL.
+ *
+ * wolfSSL is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfSSL is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/* Application linked behind the wolfBoot manifest header in the BOOT
+ * partition. @APP_ORIGIN@ / @APP_SIZE@ are filled in by the Makefile. */
+
+ENTRY(Reset_Handler)
+
+HEAP_SIZE  = 0x14000;
+STACK_SIZE = 0x8000;
+
+MEMORY
+{
+    FLASH (rx) : ORIGIN = @APP_ORIGIN@, LENGTH = @APP_SIZE@
+    RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 0x40000
+}
+
+SECTIONS
+{
+    .vectors :
+    {
+        . = ALIGN(8);
+        KEEP(*(.vectors))
+        . = ALIGN(8);
+    } > FLASH
+
+    .text :
+    {
+        . = ALIGN(8);
+        *(.text*)
+        KEEP(*(.init))
+        KEEP(*(.fini))
+        . = ALIGN(8);
+        _etext = .;
+    } > FLASH
+
+    .rodata :
+    {
+        . = ALIGN(8);
+        *(.rodata*)
+        . = ALIGN(8);
+    } > FLASH
+
+    .ARM.exidx :
+    {
+        __exidx_start = .;
+        *(.ARM.exidx*)
+        __exidx_end = .;
+    } > FLASH
+
+    .init_array :
+    {
+        PROVIDE_HIDDEN(__preinit_array_start = .);
+        PROVIDE_HIDDEN(__preinit_array_end = .);
+        PROVIDE_HIDDEN(__init_array_start = .);
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array*))
+        PROVIDE_HIDDEN(__init_array_end = .);
+        PROVIDE_HIDDEN(__fini_array_start = .);
+        KEEP(*(.fini_array*))
+        PROVIDE_HIDDEN(__fini_array_end = .);
+    } > FLASH
+
+    .copy.table :
+    {
+        . = ALIGN(8);
+        __copy_table_start__ = .;
+        LONG(LOADADDR(.data))
+        LONG(ADDR(.data))
+        LONG(SIZEOF(.data) / 4)
+        __copy_table_end__ = .;
+    } > FLASH
+
+    .zero.table :
+    {
+        . = ALIGN(8);
+        __zero_table_start__ = .;
+        LONG(ADDR(.bss))
+        LONG(SIZEOF(.bss) / 4)
+        __zero_table_end__ = .;
+    } > FLASH
+
+    /* .ramcode: wolfBoot flash routines (RAMFUNCTION), run from RAM while
+     * the trailer in the executing bank is programmed. */
+    .data :
+    {
+        . = ALIGN(8);
+        _sidata = LOADADDR(.data);
+        _sdata = .;
+        *(.data*)
+        *(.ramcode*)
+        . = ALIGN(8);
+        _edata = .;
+    } > RAM AT> FLASH
+
+    .bss (NOLOAD) :
+    {
+        . = ALIGN(8);
+        _sbss = .;
+        __bss_start__ = .;
+        *(.bss*)
+        *(COMMON)
+        . = ALIGN(8);
+        _ebss = .;
+        __bss_end__ = .;
+    } > RAM
+
+    .eth_buffers (NOLOAD) :
+    {
+        . = ALIGN(32);
+        *(.eth_buffers*)
+        . = ALIGN(32);
+    } > RAM
+
+    .heap (NOLOAD) :
+    {
+        . = ALIGN(8);
+        PROVIDE(end = .);
+        _heap_start = .;
+        . += HEAP_SIZE;
+        . = ALIGN(8);
+        _heap_end = .;
+    } > RAM
+
+    .stack (NOLOAD) :
+    {
+        . = ALIGN(8);
+        __StackLimit = .;
+        . += STACK_SIZE;
+        . = ALIGN(8);
+        __StackTop = .;
+        __stack = .;
+        _estack = .;
+    } > RAM
+
+    PROVIDE(__INITIAL_SP = __StackTop);
+    PROVIDE(__STACK_LIMIT = __StackLimit);
+
+    .ARM.attributes 0 : { *(.ARM.attributes) }
+}
